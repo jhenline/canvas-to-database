@@ -192,7 +192,8 @@ def send_email(added_records, not_found_records, courses_checked_count, existing
 def create_email_body(added_records, not_found_records, courses_checked_count, existing_records_count):
     summary_section = f"""
     <p>New records were inserted via the script: <strong>canvas-assignment-completions-to-database.py</strong><br>
-    This script checks Canvas for assignment completions defined in the canvas_grader table.</p>
+    This script checks Canvas for assignment completions defined in the canvas_grader table. The database table 
+    maps specific Canvas assignments to specific CETL programs.</p>
     <p>Summary:</p>
     <ul>
         <li>Number of Canvas course assignments checked: {courses_checked_count}</li>
