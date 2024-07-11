@@ -197,7 +197,7 @@ def create_email_body(added_records, not_found_records, courses_checked_count, e
     <p>Summary:</p>
     <ul>
         <li>Number of Canvas course assignments checked: {courses_checked_count}</li>
-        <li>Number of records skipped (already inserted into FDMS): {existing_records_count}</li>
+        <li>Number of faculty records skipped (i.e., previously recorded): {existing_records_count}</li>
     </ul>
     """
 
