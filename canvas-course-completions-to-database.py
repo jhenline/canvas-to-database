@@ -5,11 +5,12 @@ import configparser
 import mysql.connector
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
+from sendgrid.helpers.mail import TrackingSettings, ClickTracking
 
 # Read configuration from config.ini
 config = configparser.ConfigParser()
-# config.read('/home/bitnami/scripts/config.ini')  # Server Config File
-config.read('config.ini')  # Local Test Config File
+config.read('/home/bitnami/scripts/config.ini')  # Server Config File
+# config.read('config.ini')  # Local Test Config File
 
 # Canvas API Configuration
 API_URL = 'https://calstatela.instructure.com/api/v1'
@@ -136,13 +137,17 @@ def send_email(records):
         subject=subject,
         html_content=html_content
     )
+
+    # Disable URL tracking
+    tracking_settings = TrackingSettings(click_tracking=ClickTracking(enable=False, enable_text=False))
+    message.tracking_settings = tracking_settings
+
     try:
         sg = SendGridAPIClient(SENDGRID_API_KEY)
         response = sg.send(message)
         print(f"Email sent: {response.status_code}")
     except Exception as e:
         print(f"Error sending email: {e}")
-
 
 def main():
     start_time = time.time()
