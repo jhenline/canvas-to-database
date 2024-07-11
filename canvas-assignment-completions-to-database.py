@@ -12,8 +12,8 @@ test_mode = False
 
 # Read database connection details from config.ini
 config = configparser.ConfigParser()
-# config.read('/home/bitnami/scripts/config.ini')  # Server Config File
-config.read('config.ini')  # Local Test Config File
+config.read('/home/bitnami/scripts/config.ini')  # Server Config File
+# config.read('config.ini')  # Local Test Config File
 
 db_config = {
     'user': config['mysql']['DB_USER'],
@@ -29,11 +29,11 @@ canvas_token = config['auth']['token']
 # SendGrid API details
 sendgrid_api_key = config['auth']['sendgrid_api_key']
 from_email = "cetltech@calstatela.edu"
-# to_emails = ["jhenlin2@calstatela.edu", "cetltech@calstatela.edu"]
-to_emails = ["jhenlin2@calstatela.edu"]
+to_emails = ["jhenlin2@calstatela.edu", "cetltech@calstatela.edu"]
+# to_emails = ["jhenlin2@calstatela.edu"]
 
 
-# Function to connect to the database and fetch records that are not active
+# Connect to database and fetch Canvas assignments to be checked
 def fetch_canvas_grader_records(conn):
     cursor = conn.cursor(dictionary=True)
     query = """
