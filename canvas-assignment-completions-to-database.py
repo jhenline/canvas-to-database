@@ -1,3 +1,21 @@
+"""
+Canvas assignment completions to FDMS.
+
+Reads active rows from canvas_grader (Canvas course_id + assignment_id mapped to a
+CETL program) and records completions in faculty_program for matching FDMS users.
+
+Completion rules:
+  - Graded assignments: Canvas score is not null and score >= canvas_grader.points.
+    DateTaken comes from the submission's graded_at timestamp.
+  - Ungraded surveys/assignments (Canvas grading_type == "not_graded"): any submission
+    with submitted_at set counts as complete. DateTaken comes from submitted_at.
+    canvas_grader.points is ignored for these items.
+
+Users are matched by Canvas login_id to users.email. Existing faculty_program rows are
+skipped. A summary email is sent when new records are inserted or Canvas users are not
+found in FDMS. Set test_mode to True to skip database inserts.
+"""
+
 import mysql.connector
 import requests
 from datetime import datetime
@@ -30,7 +48,6 @@ canvas_token = config['auth']['token']
 sendgrid_api_key = config['auth']['sendgrid_api_key']
 from_email = "cetltech@calstatela.edu"
 to_emails = ["jhenlin2@calstatela.edu", "cetltech@calstatela.edu"]
-# to_emails = ["jhenlin2@calstatela.edu"]
 
 
 # Connect to database and fetch Canvas assignments to be checked
@@ -46,6 +63,23 @@ def fetch_canvas_grader_records(conn):
     records = cursor.fetchall()
     cursor.close()
     return records
+
+
+# Function to fetch assignment metadata (used to detect ungraded surveys)
+def fetch_assignment(course_id, assignment_id):
+    url = f"{canvas_base_url}/courses/{course_id}/assignments/{assignment_id}"
+    headers = {
+        'Authorization': f'Bearer {canvas_token}'
+    }
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP error occurred: {e} - Skipping assignment {assignment_id} in course {course_id}")
+    except Exception as e:
+        print(f"An error occurred: {e} - Skipping assignment {assignment_id} in course {course_id}")
+    return None
 
 
 # Function to fetch submissions for an assignment, handling pagination
@@ -119,10 +153,23 @@ def get_students_with_high_points(submissions, min_points):
         if submission.get('score') is not None and submission.get('score') >= min_points:
             student_info = {
                 'user_id': submission.get('user_id'),
-                'graded_at': submission.get('graded_at')
+                'completed_at': submission.get('graded_at')
             }
             high_point_students.append(student_info)
     return high_point_students
+
+
+# Function to get students who submitted an ungraded assignment/survey
+def get_students_with_submissions(submissions):
+    submitted_students = []
+    for submission in submissions:
+        if submission.get('submitted_at'):
+            student_info = {
+                'user_id': submission.get('user_id'),
+                'completed_at': submission.get('submitted_at')
+            }
+            submitted_students.append(student_info)
+    return submitted_students
 
 
 # Function to convert UTC datetime to PST
@@ -262,8 +309,16 @@ def main():
         min_points = record['points']
         program_id = record['program_id']
         program_name = record['Long_Name']
+
+        assignment = fetch_assignment(course_id, assignment_id)
+        if assignment is None:
+            continue
+
         submissions = fetch_assignment_submissions(course_id, assignment_id)
-        high_point_students = get_students_with_high_points(submissions, min_points)
+        if assignment.get('grading_type') == 'not_graded':
+            completed_students = get_students_with_submissions(submissions)
+        else:
+            completed_students = get_students_with_high_points(submissions, min_points)
 
         # Print statement for debugging:
         # print(f"Checking Assignment: {record['name']} (ID: {assignment_id})")
@@ -274,10 +329,10 @@ def main():
         courses_checked.add(course_id)  # Track unique course IDs
 
         # Fetch user profiles in parallel
-        user_ids = [student['user_id'] for student in high_point_students]
+        user_ids = [student['user_id'] for student in completed_students]
         profiles = fetch_user_profiles(user_ids)
 
-        for student, profile in zip(high_point_students, profiles):
+        for student, profile in zip(completed_students, profiles):
             email = profile.get('login_id')
 
             # Skip users whose login_id does not contain an "@" symbol
@@ -287,15 +342,20 @@ def main():
                 continue
 
             name = profile.get('short_name')
-            graded_at_pst = convert_to_pst(student['graded_at'])
+            completed_at = student.get('completed_at')
+            if not completed_at:
+                print(f"Skipping user {student['user_id']} - missing completion timestamp")
+                continue
+
+            date_taken_pst = convert_to_pst(completed_at)
             # Print all students for debugging:
-            # print(f"Student ID: {student['user_id']}, Email: {email}, Name: {name}, Graded At: {graded_at_pst}")
+            # print(f"Student ID: {student['user_id']}, Email: {email}, Name: {name}, DateTaken: {date_taken_pst}")
 
             # Insert record into faculty_program table if it doesn't exist
             if record_exists(conn, get_user_id_by_email(conn, email), program_id):
                 existing_records_count += 1
             else:
-                insert_into_faculty_program(conn, email, program_id, program_name, graded_at_pst, added_records,
+                insert_into_faculty_program(conn, email, program_id, program_name, date_taken_pst, added_records,
                                             not_found_records, name)
 
     conn.close()
