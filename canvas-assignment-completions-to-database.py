@@ -3,13 +3,15 @@ Canvas assignment completions to FDMS.
 
 Reads active rows from canvas_grader (Canvas course_id + assignment_id mapped to a
 CETL program) and records completions in faculty_program for matching FDMS users.
+canvas_grader.assignment_id may be a classic Canvas quiz ID; if the assignments API
+returns 404, the script looks up the same ID as a quiz.
 
 Completion rules:
   - Graded assignments: Canvas score is not null and score >= canvas_grader.points.
     DateTaken comes from the submission's graded_at timestamp.
-  - Ungraded surveys/assignments (Canvas grading_type == "not_graded"): any submission
-    with submitted_at set counts as complete. DateTaken comes from submitted_at.
-    canvas_grader.points is ignored for these items.
+  - Ungraded surveys/assignments (Canvas grading_type == "not_graded", or classic
+    quiz_type == "survey"): any submission with submitted_at set counts as complete.
+    DateTaken comes from submitted_at. canvas_grader.points is ignored for these items.
 
 Users are matched by Canvas login_id to users.email. Existing faculty_program rows are
 skipped. A summary email is sent when new records are inserted or Canvas users are not
@@ -65,14 +67,19 @@ def fetch_canvas_grader_records(conn):
     return records
 
 
+def canvas_headers():
+    return {
+        'Authorization': f'Bearer {canvas_token}'
+    }
+
+
 # Function to fetch assignment metadata (used to detect ungraded surveys)
 def fetch_assignment(course_id, assignment_id):
     url = f"{canvas_base_url}/courses/{course_id}/assignments/{assignment_id}"
-    headers = {
-        'Authorization': f'Bearer {canvas_token}'
-    }
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=canvas_headers())
+        if response.status_code == 404:
+            return None
         response.raise_for_status()
         return response.json()
     except requests.exceptions.HTTPError as e:
@@ -80,6 +87,57 @@ def fetch_assignment(course_id, assignment_id):
     except Exception as e:
         print(f"An error occurred: {e} - Skipping assignment {assignment_id} in course {course_id}")
     return None
+
+
+# Function to fetch classic quiz metadata
+def fetch_quiz(course_id, quiz_id):
+    url = f"{canvas_base_url}/courses/{course_id}/quizzes/{quiz_id}"
+    try:
+        response = requests.get(url, headers=canvas_headers())
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP error occurred: {e} - Skipping quiz {quiz_id} in course {course_id}")
+    except Exception as e:
+        print(f"An error occurred: {e} - Skipping quiz {quiz_id} in course {course_id}")
+    return None
+
+
+# Resolve canvas_grader.assignment_id as an assignment, or as a classic quiz ID
+def resolve_grader_item(course_id, stored_id):
+    assignment = fetch_assignment(course_id, stored_id)
+    if assignment is not None:
+        return {
+            'assignment': assignment,
+            'quiz': None,
+            'submission_assignment_id': stored_id,
+            'quiz_id': None,
+        }
+
+    quiz = fetch_quiz(course_id, stored_id)
+    if quiz is None:
+        print(f"Skipping item {stored_id} in course {course_id} - not found as assignment or quiz")
+        return None
+
+    linked_assignment_id = quiz.get('assignment_id')
+    if linked_assignment_id:
+        linked_assignment = fetch_assignment(course_id, linked_assignment_id)
+        if linked_assignment is not None:
+            return {
+                'assignment': linked_assignment,
+                'quiz': quiz,
+                'submission_assignment_id': linked_assignment_id,
+                'quiz_id': quiz.get('id'),
+            }
+
+    return {
+        'assignment': None,
+        'quiz': quiz,
+        'submission_assignment_id': None,
+        'quiz_id': stored_id,
+    }
 
 
 # Function to fetch submissions for an assignment, handling pagination
@@ -106,6 +164,42 @@ def fetch_assignment_submissions(course_id, assignment_id):
             break
         except Exception as e:
             print(f"An error occurred: {e} - Skipping assignment {assignment_id} in course {course_id}")
+            break
+
+    return submissions
+
+
+# Function to fetch classic quiz submissions and normalize them to assignment-submission shape
+def fetch_quiz_submissions(course_id, quiz_id):
+    submissions = []
+    url = f"{canvas_base_url}/courses/{course_id}/quizzes/{quiz_id}/submissions"
+
+    while url:
+        try:
+            response = requests.get(url, headers=canvas_headers())
+            response.raise_for_status()
+            data = response.json()
+            quiz_submissions = data.get('quiz_submissions', data if isinstance(data, list) else [])
+            for quiz_submission in quiz_submissions:
+                finished_at = quiz_submission.get('finished_at')
+                score = quiz_submission.get('kept_score')
+                if score is None:
+                    score = quiz_submission.get('score')
+                submissions.append({
+                    'user_id': quiz_submission.get('user_id'),
+                    'submitted_at': finished_at,
+                    'graded_at': finished_at,
+                    'score': score,
+                })
+
+            url = None
+            if 'next' in response.links:
+                url = response.links['next']['url']
+        except requests.exceptions.HTTPError as e:
+            print(f"HTTP error occurred: {e} - Skipping quiz {quiz_id} in course {course_id}")
+            break
+        except Exception as e:
+            print(f"An error occurred: {e} - Skipping quiz {quiz_id} in course {course_id}")
             break
 
     return submissions
@@ -310,12 +404,22 @@ def main():
         program_id = record['program_id']
         program_name = record['Long_Name']
 
-        assignment = fetch_assignment(course_id, assignment_id)
-        if assignment is None:
+        item = resolve_grader_item(course_id, assignment_id)
+        if item is None:
             continue
 
-        submissions = fetch_assignment_submissions(course_id, assignment_id)
-        if assignment.get('grading_type') == 'not_graded':
+        if item['submission_assignment_id']:
+            submissions = fetch_assignment_submissions(course_id, item['submission_assignment_id'])
+        else:
+            submissions = fetch_quiz_submissions(course_id, item['quiz_id'])
+
+        assignment = item.get('assignment') or {}
+        quiz = item.get('quiz') or {}
+        is_ungraded = (
+            assignment.get('grading_type') == 'not_graded'
+            or quiz.get('quiz_type') == 'survey'
+        )
+        if is_ungraded:
             completed_students = get_students_with_submissions(submissions)
         else:
             completed_students = get_students_with_high_points(submissions, min_points)
